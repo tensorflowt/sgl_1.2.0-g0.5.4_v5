@@ -197,7 +197,8 @@ impl CacheAwarePolicy {
                 interval.tick().await;  
                 
                 tracing::info!("Starting to fetch cache tree from worker: {}", prefill_worker_url); 
-                match fetch_cache_tree_from_worker(&prefill_worker_url).await {  
+                match mock_fetch_cache_tree_from_worker(&prefill_worker_url, &tokenizer).await {
+                //match fetch_cache_tree_from_worker(&prefill_worker_url).await {  
                     Ok(tree_response) => {  
                         tracing::info!(  
                             "Fetched cache tree from {} (ops_id: {}, instance_id: {})",  
@@ -344,6 +345,45 @@ async fn fetch_cache_tree_from_worker(
     let tree_response: RadixTreeResponse = response.json().await?;  
     Ok(tree_response)  
 }  
+
+// mock 
+async fn mock_fetch_cache_tree_from_worker(    
+    worker_url: &str,  
+    tokenizer: &Arc<dyn Tokenizer>,  // 新增 tokenizer 参数  
+) -> Result<RadixTreeResponse, Box<dyn std::error::Error>> {    
+    // TODO: 等 /v1/radixtree/full 接口在 prefill worker 上实现后删除此 mock  
+    // 临时硬编码响应用于测试  
+      
+    // 预设测试提示词  
+    let test_prompt = "Hello, how are you?";  
+      
+    // 使用 tokenizer 进行 token 化  
+    let encoding = tokenizer.encode(test_prompt)?;  
+    let token_ids: Vec<u32> = encoding.token_ids().to_vec();  
+      
+    info!(  
+        "Mock: tokenized '{}' into {} tokens: {:?}",   
+        test_prompt,   
+        token_ids.len(),  
+        &token_ids[..token_ids.len().min(10)]  // 只打印前10个  
+    );  
+      
+    let mock_response = RadixTreeResponse {  
+        ops_id: 1,  
+        ops_id_finished: 1,  
+        instance_id: "worker-8000".to_string(),  
+        node_ip: "127.0.0.1".to_string(),  
+        server_port: 8000,  
+        tree: RadixTreeNode {  
+            key: token_ids,  // 使用真实的 token IDs  
+            value: vec![],  
+            children: vec![],  
+        },  
+    };  
+      
+    info!("使用 mock 缓存树响应,worker: {}", worker_url);  
+    return Ok(mock_response);     
+}
   
 fn detokenize_tree(  
     tree_response: &RadixTreeResponse,  
@@ -362,7 +402,16 @@ fn detokenize_tree(
         accumulated_tokens.extend_from_slice(&node.key);  
           
         if !accumulated_tokens.is_empty() {  
-            let text = tokenizer.decode(accumulated_tokens, false)?;  
+            let text = tokenizer.decode(accumulated_tokens, false)?;
+
+            // 添加验证日志: 打印 token IDs 和反 token 化后的文本  
+            info!(  
+                "Detokenized {} tokens {:?} -> text: '{}'",  
+                accumulated_tokens.len(),  
+                &accumulated_tokens[..accumulated_tokens.len().min(20)],  // 最多打印前20个  
+                text  
+            );
+
             tree.insert(&text, tenant);  
         }  
           

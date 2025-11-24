@@ -16,7 +16,7 @@ use super::{context::SharedComponents, pipeline::RequestPipeline};
 use crate::{
     config::types::RetryConfig,
     core::{ConnectionMode, WorkerRegistry, WorkerType},
-    policies::{CacheAwarePolicy, PolicyRegistry},  // 添加 CacheAwarePolicy  ,
+    policies::PolicyRegistry, 
     protocols::{
         chat::ChatCompletionRequest,
         classify::ClassifyRequest,
