@@ -39,7 +39,7 @@ use crate::{
     logging::{self, LoggingConfig},
     metrics::{self, PrometheusConfig},
     middleware::{self, AuthConfig, QueuedRequest, TokenBucket},
-    policies::PolicyRegistry,
+    policies::{PolicyRegistry,CacheAwarePolicy},
     protocols::{
         chat::ChatCompletionRequest,
         classify::ClassifyRequest,
@@ -136,6 +136,57 @@ pub struct AppState {
     pub router_manager: Option<Arc<RouterManager>>,
 }
 
+#[derive(Deserialize)]  
+struct CacheSyncManageRequest {  
+    worker_url: String,  
+    action: CacheSyncAction,  
+}  
+  
+#[derive(Deserialize)]  
+enum CacheSyncAction {  
+    Start,  
+    Stop,  
+    Status,  
+}
+
+async fn manage_cache_sync(  
+    State(state): State<Arc<AppState>>,  
+    Json(request): Json<CacheSyncManageRequest>,  
+) -> Response {  
+    let prefill_policy = state.context.policy_registry.get_prefill_policy();  
+      
+    if let Some(cache_aware) = prefill_policy.as_any().downcast_ref::<CacheAwarePolicy>() {  
+        match request.action {  
+            CacheSyncAction::Start => {  
+                if let Some(tokenizer) = &state.context.tokenizer {  
+                    cache_aware.start_cache_sync(request.worker_url, tokenizer.clone());  
+                    let response = json!({"status": "started"});  
+                    (StatusCode::OK, Json(response)).into_response()  
+                } else {  
+                    let error_response = json!({"error": "Tokenizer not available"});  
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()  
+                }  
+            }  
+            CacheSyncAction::Stop => {  
+                cache_aware.stop_cache_sync(&request.worker_url);  
+                let response = json!({"status": "stopped"});  
+                (StatusCode::OK, Json(response)).into_response()  
+            }  
+            CacheSyncAction::Status => {  
+                let is_running = cache_aware.has_active_sync_task(&request.worker_url);  
+                let response = json!({  
+                    "worker_url": request.worker_url,   
+                    "is_syncing": is_running  
+                });  
+                (StatusCode::OK, Json(response)).into_response()  
+            }  
+        }  
+    } else {  
+        let error_response = json!({"error": "Cache aware policy not found"});  
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()  
+    }  
+}  
+  
 async fn sink_handler() -> Response {
     StatusCode::NOT_FOUND.into_response()
 }
@@ -729,6 +780,7 @@ pub fn build_app(
     let admin_routes = Router::new()
         .route("/flush_cache", post(flush_cache))
         .route("/get_loads", get(get_loads))
+        .route("/cache_sync/manage", post(manage_cache_sync))
         .route_layer(axum::middleware::from_fn_with_state(
             auth_config.clone(),
             middleware::auth_middleware,

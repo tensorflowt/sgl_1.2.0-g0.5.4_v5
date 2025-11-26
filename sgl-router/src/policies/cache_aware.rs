@@ -73,6 +73,7 @@ use tokio::task::JoinHandle;
 use crate::tokenizer::traits::Tokenizer;
 
 use std::sync::RwLock;
+use std::collections::HashMap;  
 
 // 添加响应数据结构  
 #[derive(Debug, Deserialize, Serialize)]  
@@ -103,6 +104,7 @@ pub struct CacheAwarePolicy {
     trees: Arc<DashMap<String, Arc<Tree>>>,
     eviction_handle: Option<thread::JoinHandle<()>>,
     sync_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    sync_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>, 
 }
 
 impl CacheAwarePolicy {
@@ -142,6 +144,7 @@ impl CacheAwarePolicy {
             trees,
             eviction_handle,
             sync_handle: Arc::new(RwLock::new(None)),
+            sync_tasks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -182,11 +185,23 @@ impl CacheAwarePolicy {
             return;  
         }    
         info!("Starting cache sync task 2...");
+
+        // 检查是否已有同步任务  
+        {  
+            let mut tasks = self.sync_tasks.write().unwrap();  
+            if tasks.contains_key(&prefill_worker_url) {  
+                info!("Cache sync already running for worker: {}", prefill_worker_url);  
+                return;  
+            }  
+        } 
+
         let trees = Arc::clone(&self.trees);  
         let sync_interval_secs = self.config.sync_interval_secs;  
-          
-        // 克隆 URL 用于日志记录  
         let worker_url_for_log = prefill_worker_url.clone();
+        let sync_tasks = Arc::clone(&self.sync_tasks); 
+
+        // 在移动到闭包前克隆一个副本
+        let worker_url_for_closure = prefill_worker_url.clone();
 
         let handle = tokio::spawn(async move {    
             let mut interval = tokio::time::interval(    
@@ -196,20 +211,20 @@ impl CacheAwarePolicy {
             loop {    
                 interval.tick().await;    
                 
-                tracing::info!("Starting to fetch cache tree from worker: {}", prefill_worker_url);   
+                tracing::info!("Starting to fetch cache tree from worker: {}", worker_url_for_closure);   
                 
                 // 根据URL判断连接模式并选择获取方式  
-                let tree_result = if prefill_worker_url.starts_with("grpc://") || prefill_worker_url.starts_with("grpcs://") {  
-                    fetch_cache_tree_from_grpc_worker(&prefill_worker_url).await  
+                let tree_result = if worker_url_for_closure.starts_with("grpc://") || worker_url_for_closure.starts_with("grpcs://") {  
+                    fetch_cache_tree_from_grpc_worker(&worker_url_for_closure).await  
                 } else {  
-                    fetch_cache_tree_from_http_worker(&prefill_worker_url).await  
+                    fetch_cache_tree_from_http_worker(&worker_url_for_closure).await  
                 };  
                 
                 match tree_result {    
                     Ok(tree_response) => {    
                         tracing::info!(    
                             "Fetched cache tree from {} (ops_id: {}, instance_id: {})",    
-                            prefill_worker_url,    
+                            worker_url_for_closure,    
                             tree_response.ops_id,    
                             tree_response.instance_id,  
                         );    
@@ -221,7 +236,7 @@ impl CacheAwarePolicy {
                             Err(e) => {    
                                 tracing::warn!(    
                                     "Failed to detokenize tree from {}: {}",    
-                                    prefill_worker_url,    
+                                    worker_url_for_closure,    
                                     e    
                                 );    
                             }    
@@ -230,7 +245,7 @@ impl CacheAwarePolicy {
                     Err(e) => {    
                         tracing::warn!(    
                             "Failed to fetch cache tree from {}: {}",     
-                            prefill_worker_url,     
+                            worker_url_for_closure,     
                             e    
                         );    
                     }    
@@ -238,13 +253,27 @@ impl CacheAwarePolicy {
             }    
         });  
           
-        *self.sync_handle.write().unwrap() = Some(handle); 
+        sync_tasks.write().unwrap().insert(prefill_worker_url, handle);
+
         tracing::info!(  
             "Cache sync enabled for worker {} with interval {} seconds",  
             worker_url_for_log,  
             sync_interval_secs  
         );  
     }
+
+    /// 停止指定worker的缓存同步  
+    pub fn stop_cache_sync(&self, worker_url: &str) {  
+        if let Some(handle) = self.sync_tasks.write().unwrap().remove(worker_url) {  
+            handle.abort();  
+            info!("Cache sync stopped for worker: {}", worker_url);  
+        }  
+    }  
+      
+    /// 检查worker是否有活跃的同步任务  
+    pub fn has_active_sync_task(&self, worker_url: &str) -> bool {  
+        self.sync_tasks.read().unwrap().contains_key(worker_url)  
+    }  
 
     /// Initialize the tree with worker URLs (used only during initial setup)
     pub fn init_workers(&self, workers: &[Arc<dyn Worker>]) {
@@ -482,6 +511,12 @@ impl Drop for CacheAwarePolicy {
         if let Some(handle) = self.eviction_handle.take() {  
             drop(handle);  
         }  
+
+        // 停止所有同步任务  
+        for (worker_url, handle) in self.sync_tasks.write().unwrap().drain() {  
+            handle.abort();  
+            info!("Cache sync stopped for worker: {}", worker_url);  
+        }
           
         if let Ok(mut guard) = self.sync_handle.write() {  
             if let Some(handle) = guard.take() {  
