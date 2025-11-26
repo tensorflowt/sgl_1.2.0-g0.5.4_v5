@@ -188,47 +188,54 @@ impl CacheAwarePolicy {
         // 克隆 URL 用于日志记录  
         let worker_url_for_log = prefill_worker_url.clone();
 
-        let handle = tokio::spawn(async move {  
-            let mut interval = tokio::time::interval(  
-                tokio::time::Duration::from_secs(sync_interval_secs)  
-            );  
-              
-            loop {  
-                interval.tick().await;  
+        let handle = tokio::spawn(async move {    
+            let mut interval = tokio::time::interval(    
+                tokio::time::Duration::from_secs(sync_interval_secs)    
+            );    
                 
-                tracing::info!("Starting to fetch cache tree from worker: {}", prefill_worker_url); 
-                match mock_fetch_cache_tree_from_worker(&prefill_worker_url, &tokenizer).await {
-                //match fetch_cache_tree_from_worker(&prefill_worker_url).await {  
-                    Ok(tree_response) => {  
-                        tracing::info!(  
-                            "Fetched cache tree from {} (ops_id: {}, instance_id: {})",  
-                            prefill_worker_url,  
-                            tree_response.ops_id,  
-                            tree_response.instance_id,
-                        );  
-                          
-                        match detokenize_tree(&tree_response, &tokenizer) {  
-                            Ok(string_tree) => {  
-                                replace_tree(&trees, &tree_response, string_tree);  
-                            }  
-                            Err(e) => {  
-                                tracing::warn!(  
-                                    "Failed to detokenize tree from {}: {}",  
-                                    prefill_worker_url,  
-                                    e  
-                                );  
-                            }  
-                        }  
-                    }  
-                    Err(e) => {  
-                        tracing::warn!(  
-                            "Failed to fetch cache tree from {}: {}",   
-                            prefill_worker_url,   
-                            e  
-                        );  
-                    }  
-                }  
-            }  
+            loop {    
+                interval.tick().await;    
+                
+                tracing::info!("Starting to fetch cache tree from worker: {}", prefill_worker_url);   
+                
+                // 根据URL判断连接模式并选择获取方式  
+                let tree_result = if prefill_worker_url.starts_with("grpc://") || prefill_worker_url.starts_with("grpcs://") {  
+                    fetch_cache_tree_from_grpc_worker(&prefill_worker_url).await  
+                } else {  
+                    fetch_cache_tree_from_http_worker(&prefill_worker_url).await  
+                };  
+                
+                match tree_result {    
+                    Ok(tree_response) => {    
+                        tracing::info!(    
+                            "Fetched cache tree from {} (ops_id: {}, instance_id: {})",    
+                            prefill_worker_url,    
+                            tree_response.ops_id,    
+                            tree_response.instance_id,  
+                        );    
+                            
+                        match detokenize_tree(&tree_response, &tokenizer) {    
+                            Ok(string_tree) => {    
+                                replace_tree(&trees, &tree_response, string_tree);    
+                            }    
+                            Err(e) => {    
+                                tracing::warn!(    
+                                    "Failed to detokenize tree from {}: {}",    
+                                    prefill_worker_url,    
+                                    e    
+                                );    
+                            }    
+                        }    
+                    }    
+                    Err(e) => {    
+                        tracing::warn!(    
+                            "Failed to fetch cache tree from {}: {}",     
+                            prefill_worker_url,     
+                            e    
+                        );    
+                    }    
+                }    
+            }    
         });  
           
         *self.sync_handle.write().unwrap() = Some(handle); 
@@ -333,18 +340,42 @@ impl CacheAwarePolicy {
 }
 
 // 辅助函数
-async fn fetch_cache_tree_from_worker(  
-    worker_url: &str  
-) -> Result<RadixTreeResponse, Box<dyn std::error::Error>> {  
-    let client = reqwest::Client::new();  
-    let response = client  
-        .get(format!("{}/v1/radixtree/full", worker_url))  
-        .send()  
-        .await?;  
+// async fn fetch_cache_tree_from_worker(  
+//     worker_url: &str  
+// ) -> Result<RadixTreeResponse, Box<dyn std::error::Error>> {  
+//     let client = reqwest::Client::new();  
+//     let response = client  
+//         .get(format!("{}/v1/radixtree/full", worker_url))  
+//         .send()  
+//         .await?;  
       
-    let tree_response: RadixTreeResponse = response.json().await?;  
-    Ok(tree_response)  
-}  
+//     let tree_response: RadixTreeResponse = response.json().await?;  
+//     Ok(tree_response)  
+// }  
+
+// HTTP模式缓存获取函数  
+async fn fetch_cache_tree_from_http_worker(    
+    worker_url: &str    
+) -> Result<RadixTreeResponse, Box<dyn std::error::Error>> {    
+    let client = reqwest::Client::new();    
+    let response = client    
+        .get(format!("{}/v1/radixtree/full", worker_url))    
+        .send()    
+        .await?;    
+        
+    let tree_response: RadixTreeResponse = response.json().await?;    
+    Ok(tree_response)    
+}    
+  
+// gRPC模式缓存获取函数（占位符，需要根据实际gRPC接口实现）  
+async fn fetch_cache_tree_from_grpc_worker(    
+    worker_url: &str    
+) -> Result<RadixTreeResponse, Box<dyn std::error::Error>> {    
+    // TODO: 实现gRPC模式的缓存树获取  
+    // 这里需要根据实际的gRPC接口定义来实现  
+    // 目前先返回错误，表示gRPC模式暂未实现  
+    Err("gRPC mode cache sync not yet implemented".into())  
+}
 
 // mock 
 async fn mock_fetch_cache_tree_from_worker(    
